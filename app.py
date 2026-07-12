@@ -1,10 +1,14 @@
 import os
 from dataclasses import dataclass, asdict
+from io import BytesIO
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
 import requests
 import streamlit as st
+from openpyxl import Workbook
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.utils import get_column_letter
 
 
 # =========================================================
@@ -16,8 +20,8 @@ import streamlit as st
 # - Sin autenticación
 # - SerpAPI como fuente única
 # - Búsqueda orientada a COMPRADORES potenciales
+# - Selección múltiple y exportación a Excel formateado
 # =========================================================
-
 
 st.set_page_config(
     page_title="Sales Intelligence Guatemala",
@@ -71,10 +75,12 @@ class Prospect:
     rationale: str = ""
     pain_point: str = ""
     score: int = 0
+    probability: int = 0
     technologies: Optional[List[str]] = None
     evidence: Optional[List[str]] = None
     stage: str = "Nuevo"
     next_step: str = ""
+    selected: bool = False
 
     def __post_init__(self) -> None:
         if self.technologies is None:
@@ -92,10 +98,6 @@ def split_csv(text: str) -> List[str]:
 
 
 def build_buyer_intent_query(product: str, sector: str, locations: List[str], signals: List[str]) -> str:
-    """
-    Construye una consulta que apunta a empresas con intención de compra.
-    El producto se usa como objeto de demanda, no como algo a comprar.
-    """
     buyer_terms = [
         "cotización",
         "cotizar",
@@ -214,20 +216,19 @@ def build_prospect_from_result(result: Dict[str, Any], query: Dict[str, Any]) ->
         "Aparece en una consulta real de SerpAPI y contiene señales compatibles con intención de compra "
         "relacionadas con lo que el usuario vende."
     )
-
     pain_point = "Por confirmar con más evidencia en el sitio o fuente recuperada."
 
     return Prospect(
         name=title,
         sector=sector,
         location=location,
+        size=query.get("size", ""),
         website=link,
         source=source,
         signal=snippet,
         rationale=rationale,
         pain_point=pain_point,
         evidence=[snippet] if snippet else [],
-        technologies=[],
     )
 
 
@@ -256,11 +257,108 @@ def score_prospect(prospect: Dict[str, Any], query: Dict[str, Any]) -> int:
     return min(score, 100)
 
 
+def create_formatted_excel(selected_rows: List[Dict[str, Any]]) -> bytes:
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Prospectos Seleccionados"
+
+    title_fill = PatternFill("solid", fgColor="1F2937")
+    header_fill = PatternFill("solid", fgColor="2563EB")
+    header_font = Font(color="FFFFFF", bold=True)
+    title_font = Font(color="FFFFFF", bold=True, size=14)
+    thin = Side(style="thin", color="D1D5DB")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    headers = [
+        "Nombre",
+        "Sector",
+        "Ubicación",
+        "Tamaño",
+        "Website",
+        "Fuente",
+        "Señal",
+        "Razón",
+        "Dolor probable",
+        "Score",
+        "Probabilidad de compra (%)",
+        "Etapa",
+        "Siguiente paso",
+    ]
+
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=len(headers))
+    title_cell = ws.cell(row=1, column=1, value="Prospectos seleccionados")
+    title_cell.fill = title_fill
+    title_cell.font = title_font
+    title_cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    for col_idx, header in enumerate(headers, start=1):
+        cell = ws.cell(row=2, column=col_idx, value=header)
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        cell.border = border
+
+    for row_idx, row in enumerate(selected_rows, start=3):
+        values = [
+            row.get("name", ""),
+            row.get("sector", ""),
+            row.get("location", ""),
+            row.get("size", ""),
+            row.get("website", ""),
+            row.get("source", ""),
+            row.get("signal", ""),
+            row.get("rationale", ""),
+            row.get("pain_point", ""),
+            row.get("score", 0),
+            row.get("probability", 0),
+            row.get("stage", ""),
+            row.get("next_step", ""),
+        ]
+        for col_idx, value in enumerate(values, start=1):
+            cell = ws.cell(row=row_idx, column=col_idx, value=value)
+            cell.border = border
+            cell.alignment = Alignment(vertical="top", wrap_text=True)
+
+    widths = {
+        1: 30,
+        2: 18,
+        3: 18,
+        4: 14,
+        5: 38,
+        6: 18,
+        7: 42,
+        8: 42,
+        9: 28,
+        10: 10,
+        11: 20,
+        12: 16,
+        13: 20,
+    }
+    for col_idx, width in widths.items():
+        ws.column_dimensions[get_column_letter(col_idx)].width = width
+
+    ws.freeze_panes = "A3"
+    ws.auto_filter.ref = f"A2:M{len(selected_rows) + 2}"
+
+    for row_idx in range(3, len(selected_rows) + 3):
+        if row_idx % 2 == 0:
+            for col_idx in range(1, len(headers) + 1):
+                ws.cell(row=row_idx, column=col_idx).fill = PatternFill("solid", fgColor="F9FAFB")
+
+    buffer = BytesIO()
+    wb.save(buffer)
+    buffer.seek(0)
+    return buffer.read()
+
+
 if "pipeline" not in st.session_state:
     st.session_state.pipeline = []
 
 if "selected_prospect" not in st.session_state:
     st.session_state.selected_prospect = None
+
+if "search_results_df" not in st.session_state:
+    st.session_state.search_results_df = pd.DataFrame()
 
 
 with st.sidebar:
@@ -270,34 +368,19 @@ with st.sidebar:
 
     st.subheader("Perfil de búsqueda")
     with st.form("search_form", clear_on_submit=False):
-        product = st.text_input(
-            "¿Qué deseas vender?",
-            placeholder="Ej. software ERP, impresión digital, consultoría, etc.",
-        )
-        buyer_sector = st.text_input(
-            "Sector del comprador",
-            placeholder="Ej. logística, retail, manufactura",
-        )
-        target_locations_raw = st.text_input(
-            "Cobertura geográfica",
-            placeholder="Ej. Ciudad de Guatemala, Escuintla",
-        )
-        size = st.text_input(
-            "Tamaño del comprador",
-            placeholder="Ej. 50-400 empleados",
-        )
-        signals_raw = st.text_input(
-            "Señales de compra / intención",
-            placeholder="Ej. cotización, busca proveedor, expansión, nueva sucursal",
-        )
+        product = st.text_input("¿Qué deseas vender?", placeholder="Ej. software ERP, impresión digital, consultoría, etc.")
+        buyer_sector = st.text_input("Sector del comprador", placeholder="Ej. logística, retail, manufactura")
+        target_locations_raw = st.text_input("Cobertura geográfica", placeholder="Ej. Ciudad de Guatemala, Escuintla")
+        size = st.text_input("Tamaño del comprador", placeholder="Ej. 50-400 empleados")
+        signals_raw = st.text_input("Señales de compra / intención", placeholder="Ej. cotización, busca proveedor, expansión, nueva sucursal")
         limit = st.slider("Máximo de resultados por fuente", 5, 20, 10)
         search_mode = st.selectbox("Modo de búsqueda", ["Web", "Mapas", "Ambos"])
         submitted = st.form_submit_button("Buscar compradores potenciales")
 
+    show_over_80 = st.checkbox("Mostrar solo prospectos con probabilidad >= 80%", value=False)
     st.markdown("---")
-    st.subheader("Fuente de datos")
-    st.write("SerpAPI:", "✅" if env("SERPAPI_KEY") else "⚪ no configurada")
-    st.caption("Configura SERPAPI_KEY en Streamlit Cloud para obtener resultados reales.")
+    st.subheader("Exportación")
+    st.caption("Solo se exportan los prospectos seleccionados.")
 
 
 st.title("Cabina de Inteligencia Comercial")
@@ -306,12 +389,11 @@ st.write(
     "No usa mock data, créditos, pagos ni autenticación."
 )
 
-query_cfg: Dict[str, Any] = {}
 if submitted:
     target_locations = split_csv(target_locations_raw)
     signals = split_csv(signals_raw)
 
-    query_cfg = {
+    query_cfg: Dict[str, Any] = {
         "product": product,
         "buyer_sector": buyer_sector,
         "target_sectors": [buyer_sector] if buyer_sector else [],
@@ -320,12 +402,7 @@ if submitted:
         "signals": signals,
     }
 
-    search_query = build_buyer_intent_query(
-        product=product,
-        sector=buyer_sector,
-        locations=target_locations,
-        signals=signals,
-    )
+    search_query = build_buyer_intent_query(product, buyer_sector, target_locations, signals)
 
     if not search_query.strip():
         st.warning("Completa al menos el producto o un criterio de búsqueda.")
@@ -337,83 +414,96 @@ if submitted:
             if search_mode in ["Mapas", "Ambos"]:
                 combined.extend(serpapi_search(search_query, engine="google_maps", num=limit))
 
-            prospects: List[Prospect] = []
+            prospects: List[Dict[str, Any]] = []
             for result in combined:
                 p = build_prospect_from_result(result, query_cfg)
                 p.score = score_prospect(asdict(p), query_cfg)
-                prospects.append(p)
+                p.probability = p.score
+                prospects.append(asdict(p))
 
-            prospects = sorted(prospects, key=lambda x: x.score, reverse=True)
-            st.session_state.pipeline = [asdict(p) for p in prospects]
-            st.session_state.selected_prospect = st.session_state.pipeline[0] if st.session_state.pipeline else None
-
+            prospects = sorted(prospects, key=lambda x: x["score"], reverse=True)
+            st.session_state.pipeline = prospects
+            st.session_state.selected_prospect = prospects[0] if prospects else None
 
 tab1, tab2, tab3 = st.tabs(["Compradores potenciales", "Pipeline", "Mensajes"])
 
 
 with tab1:
     st.subheader("Compradores potenciales encontrados")
-    st.caption(
-        "El resultado busca empresas que podrían querer comprar lo que tú vendes, no proveedores de la misma categoría."
-    )
+    st.caption("El resultado busca empresas que podrían querer comprar lo que tú vendes, no proveedores de la misma categoría.")
 
-    if not st.session_state.pipeline:
-        st.info("No hay prospectos cargados todavía. Conecta SERPAPI_KEY y ejecuta una búsqueda.")
+    pipeline = st.session_state.pipeline
+    if show_over_80:
+        pipeline = [p for p in pipeline if int(p.get("probability", 0)) >= 80]
+
+    if not pipeline:
+        st.info("No hay prospectos para mostrar con los filtros actuales.")
         st.markdown(
             """
             <div class="card">
                 <strong>Estado vacío honesto</strong><br>
-                La aplicación no muestra empresas ficticias ni señales simuladas.
+                Ajusta la búsqueda o desactiva el filtro de probabilidad mínima.
             </div>
             """,
             unsafe_allow_html=True,
         )
     else:
-        for i, prospect in enumerate(st.session_state.pipeline):
-            st.markdown('<div class="card">', unsafe_allow_html=True)
-            col1, col2 = st.columns([4, 1])
+        df = pd.DataFrame(pipeline).copy()
+        if "selected" not in df.columns:
+            df["selected"] = False
 
-            with col1:
-                st.markdown(f"### {prospect.get('name', '')}")
-                meta = []
-                if prospect.get("sector"):
-                    meta.append(f"Sector: {prospect['sector']}")
-                if prospect.get("location"):
-                    meta.append(f"Ubicación: {prospect['location']}")
-                if prospect.get("source"):
-                    meta.append(f"Fuente: {prospect['source']}")
-                if meta:
-                    st.write(" | ".join(meta))
-                if prospect.get("signal"):
-                    st.markdown(f"**Señal observada:** {prospect['signal']}")
-                if prospect.get("rationale"):
-                    st.markdown(f"**Razón de encaje:** {prospect['rationale']}")
-                if prospect.get("pain_point"):
-                    st.markdown(f"**Dolor probable:** {prospect['pain_point']}")
-                if prospect.get("website"):
-                    st.markdown(f"[Abrir fuente / sitio]({prospect['website']})")
-                if prospect.get("technologies"):
-                    st.caption(f"Tecnologías detectadas: {', '.join(prospect['technologies'])}")
+        if st.checkbox("Seleccionar todos los visibles", key="select_all_visible"):
+            df["selected"] = True
 
-            with col2:
-                score = int(prospect.get("score", 0))
-                badge_class = "badge-high" if score >= 75 else "badge-med" if score >= 45 else "badge-low"
-                st.markdown(
-                    f'<span class="badge {badge_class}">Score {score}/100</span>',
-                    unsafe_allow_html=True,
-                )
-                if st.button("Seleccionar", key=f"sel_{i}"):
-                    st.session_state.selected_prospect = prospect
-                    st.success("Prospecto seleccionado.")
+        st.caption("Marca los prospectos que deseas exportar.")
+        edited_df = st.data_editor(
+            df[
+                [
+                    "selected",
+                    "name",
+                    "probability",
+                    "score",
+                    "source",
+                    "sector",
+                    "location",
+                    "website",
+                    "signal",
+                    "rationale",
+                    "pain_point",
+                    "stage",
+                    "next_step",
+                ]
+            ],
+            use_container_width=True,
+            hide_index=True,
+            num_rows="fixed",
+            column_config={
+                "selected": st.column_config.CheckboxColumn("Seleccionar"),
+                "probability": st.column_config.NumberColumn("Probabilidad (%)", min_value=0, max_value=100),
+                "score": st.column_config.NumberColumn("Score", min_value=0, max_value=100),
+                "website": st.column_config.LinkColumn("Website"),
+            },
+        )
 
-            st.markdown("</div>", unsafe_allow_html=True)
+        selected_rows = edited_df[edited_df["selected"] == True].copy()
+        selected_rows = selected_rows.drop(columns=["selected"], errors="ignore")
+
+        if not selected_rows.empty:
+            st.success(f"{len(selected_rows)} prospecto(s) seleccionado(s).")
+            excel_bytes = create_formatted_excel(selected_rows.to_dict(orient="records"))
+            st.download_button(
+                label="Exportar seleccionados a Excel",
+                data=excel_bytes,
+                file_name="prospectos_seleccionados.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        else:
+            st.info("Selecciona uno o varios prospectos para exportarlos.")
 
 
 with tab2:
     st.subheader("Pipeline de trabajo")
-    st.caption(
-        "Seguimiento simple, sin CRM de pago, sin login y sin créditos. El pipeline refleja empresas con intención de compra."
-    )
+    st.caption("Seguimiento simple, sin CRM de pago, sin login y sin créditos. El pipeline refleja empresas con intención de compra.")
 
     pipeline_df = pd.DataFrame(st.session_state.pipeline)
     if pipeline_df.empty:
@@ -423,8 +513,10 @@ with tab2:
             pipeline_df["stage"] = "Nuevo"
         if "next_step" not in pipeline_df.columns:
             pipeline_df["next_step"] = ""
+        if "probability" not in pipeline_df.columns:
+            pipeline_df["probability"] = pipeline_df.get("score", 0)
 
-        cols = [c for c in ["name", "score", "source", "stage", "next_step", "website"] if c in pipeline_df.columns]
+        cols = [c for c in ["name", "score", "probability", "source", "stage", "next_step", "website"] if c in pipeline_df.columns]
         edited = st.data_editor(
             pipeline_df[cols],
             use_container_width=True,
@@ -435,7 +527,9 @@ with tab2:
                     "stage",
                     options=["Nuevo", "Contactado", "Interesado", "Reunión", "Ganado", "Descartado"],
                     required=True,
-                )
+                ),
+                "probability": st.column_config.NumberColumn("Probabilidad (%)", min_value=0, max_value=100),
+                "website": st.column_config.LinkColumn("Website"),
             },
         )
 
@@ -462,6 +556,7 @@ with tab3:
 
         with col2:
             st.markdown(f"**Prospecto activo:** {prospect_dict.get('name', '')}")
+            st.caption(f"Probabilidad de compra: {int(prospect_dict.get('probability', 0))}%")
             if generate:
                 name = prospect_dict.get("name", "la empresa")
                 signal = prospect_dict.get("signal", "una señal reciente observada en fuente real")
@@ -488,7 +583,6 @@ with tab3:
 
                 st.text_area("Borrador", value=body, height=220)
                 st.caption(f"Tono sugerido: {tone}")
-
 
 st.markdown("---")
 st.caption("Configura SERPAPI_KEY en Streamlit Cloud para obtener resultados reales.")
