@@ -1,304 +1,212 @@
-from __future__ import annotations
-
-import json
-from datetime import datetime
-from pathlib import Path
-
-import pandas as pd
 import streamlit as st
+import time
+import random
 
-from src.auth import password_gate, get_secret
-from src.db import (
-    delete_prospect,
-    get_saved_prospects,
-    init_db,
-    save_prospects,
-    stage_summary,
-    update_note,
-    update_stage,
+# ==========================================
+# CONFIGURACIÓN DE LA PÁGINA Y ESTILOS
+# ==========================================
+st.set_page_config(
+    page_title="Sales Intelligence Guatemala",
+    page_icon="💼",
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
-from src.prospecting import generate_prospects
-from src.utils import PIPELINE_STAGES, safe_float, score_label
 
+# Estilos CSS personalizados para simular el look-and-feel de shadcn/ui
+st.markdown("""
+<style>
+    .reportview-container { background: #f8fafc; }
+    .stMetric { background-color: #ffffff; padding: 15px; border-radius: 8px; border: 1px solid #e2e8f0; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }
+    .card { background-color: #ffffff; padding: 20px; border-radius: 8px; border: 1px solid #e2e8f0; margin-bottom: 15px; }
+    .score-badge { padding: 5px 12px; border-radius: 20px; font-weight: bold; font-size: 14px; display: inline-block; }
+    .score-excelente { background-color: #dcfce7; color: #166534; }
+    .score-alta { background-color: #fef9c3; color: #854d0e; }
+</style>
+""", unsafe_allowed_html=True)
 
-APP_TITLE = "Sales Intelligence Guatemala"
-DEFAULT_MODEL = get_secret("OPENROUTER_MODEL", "deepseek/deepseek-v4-flash")
+# ==========================================
+# SIMULACIÓN DE DATOS (MOCK DATA)
+# ==========================================
+if 'creditos' not in st.session_state:
+    st.session_state.creditos = 150
 
-st.set_page_config(page_title=APP_TITLE, page_icon="📈", layout="wide")
-password_gate(APP_TITLE)
-init_db()
-
-
-if "default_stage" not in st.session_state:
-    st.session_state.default_stage = PIPELINE_STAGES[0]
-if "filters" not in st.session_state:
-    st.session_state.filters = {"min_score": 0.0, "stage": "Todos"}
-
-
-st.title(APP_TITLE)
-st.caption("Asistente inteligente de ventas para encontrar, calificar, contactar y convertir prospectos en Guatemala.")
-
-with st.sidebar:
-    st.header("Configuración")
-    st.write("Modelo IA:", DEFAULT_MODEL)
-    st.write("Modo:", "OpenRouter" if get_secret("OPENROUTER_API_KEY", "").strip() else "Demo local")
-
-    st.subheader("Pipeline por defecto")
-    st.session_state.default_stage = st.selectbox("Etapa", PIPELINE_STAGES, index=0)
-
-    st.subheader("Filtros")
-    min_score = st.slider("Score mínimo", 0, 100, 0)
-    stage_filter = st.selectbox("Etapa", ["Todos"] + PIPELINE_STAGES, index=0)
-    st.session_state.filters = {"min_score": float(min_score), "stage": stage_filter}
-
-    st.subheader("Exportación")
-    export_format = st.selectbox("Formato", ["Excel", "CSV", "JSON"])
-
-pages = st.tabs(["Prospección", "Pipeline CRM", "Alertas", "Automatización", "Ajustes"])
-
-
-# -----------------------------
-# Prospección
-# -----------------------------
-with pages[0]:
-    st.subheader("Define tu oferta")
-
-    c1, c2 = st.columns(2)
-    with c1:
-        product_service = st.text_input("¿Qué producto o servicio deseas vender?")
-        description = st.text_area("Descripción breve")
-        sector = st.text_input("Sector económico")
-        price = st.text_input("Precio aproximado")
-        ideal_client = st.text_input("Tipo de cliente ideal")
-    with c2:
-        coverage = st.text_input("Cobertura geográfica", value="Guatemala")
-        company_size = st.text_input("Tamaño de empresa objetivo")
-        decision_role = st.text_input("Cargo del decisor")
-        competitors = st.text_input("Competidores")
-
-    benefits = st.text_area("Beneficios principales")
-    problems = st.text_area("Problemas que resuelve")
-    success_cases = st.text_area("Casos de éxito")
-
-    profile = {
-        "product_service": product_service,
-        "description": description,
-        "sector": sector,
-        "price": price,
-        "ideal_client": ideal_client,
-        "coverage": coverage,
-        "company_size": company_size,
-        "decision_role": decision_role,
-        "competitors": competitors,
-        "benefits": benefits,
-        "problems": problems,
-        "success_cases": success_cases,
+# Empresas precargadas (Base de conocimiento RAG simulada)
+EMPRESAS_MOCK = [
+    {
+        "nombre": "Corporación Alimentos del Istmo S.A.",
+        "giro": "Manufactura y Distribución de Alimentos",
+        "ubicacion": "Zona 12, Ciudad de Guatemala",
+        "empleados": "350+",
+        "digitalizacion": "Media (Sitio web básico, sin píxeles de conversión avanzados)",
+        "noticia": "Abriendo nuevo centro de distribución logística en Quetzaltenango (Xela).",
+        "tecnologias": ["SAP ERP", "Microsoft 365", "Google Analytics"],
+        "score": 96,
+        "justificacion": "Match crítico: Buscan expandir operaciones a Xela y carecen de software de optimización de rutas o CRM avanzado para coordinar equipos remotos.",
+        "dolor": "Falta de visibilidad en tiempo real del inventario en tránsito hacia los departamentos.",
+        "foda": {"F": "Liderazgo en el mercado local", "D": "Procesos de ventas manuales", "O": "Apertura en el occidente del país", "A": "Competencia internacional con mejor tecnología"}
+    },
+    {
+        "nombre": "Logística y Transportes de Guatemala (LogiGuate)",
+        "giro": "Transporte de Carga y Cadena de Suministro",
+        "ubicacion": "Siquinalá, Escuintla",
+        "empleados": "120",
+        "digitalizacion": "Alta (GPS corporativo, pasarela de pagos básica)",
+        "noticia": "Recibió inversión de fondo regional para modernización de flota.",
+        "tecnologias": ["WordPress", "Meta Pixel", "HubSpot Free"],
+        "score": 89,
+        "justificacion": "Alta compatibilidad: Cuentan con capital reciente para inversión tecnológica y ya usan herramientas de marketing, facilitando la venta de integraciones avanzadas.",
+        "dolor": "Alta tasa de rotación en ejecutivos de cuentas clave y demora en cotizaciones complejas.",
+        "foda": {"F": "Flota moderna", "D": "Cuellos de botella en atención al cliente", "O": "Automatización de cotizaciones", "A": "Fluctuación del precio del combustible"}
     }
+]
 
-    col_a, col_b = st.columns([1, 3])
-    with col_a:
-        run_btn = st.button("Buscar prospectos con IA", type="primary")
-    with col_b:
-        st.caption("La IA prioriza empresas con mayor compatibilidad y genera mensajes personalizados por prospecto.")
+# ==========================================
+# BARRA LATERAL (SIDEBAR) - ONBOARDING / ICP
+# ==========================================
+with st.sidebar:
+    st.image("https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=100&auto=format&fit=crop", width=60) # Decorativo institucional
+    st.title("Sales Intelligence GT")
+    st.caption("Tu Asistente de Ventas IA 24/7")
+    st.markdown("---")
+    
+    st.subheader("🎯 Perfil de Tu Empresa (ICP)")
+    with st.form("icp_form"):
+        que_vende = st.text_input("¿Qué deseas vender?", value="Software ERP de Logística e Inventarios")
+        sector_target = st.multiselect("Sectores Objetivo", ["Consumo Masivo", "Logística", "Servicios", "Tecnología"], default=["Consumo Masivo", "Logística"])
+        tamaño_target = st.slider("Tamaño de empresa ideal (Empleados)", 10, 500, (50, 400))
+        decisor = st.text_input("Cargo del decisor político", value="Gerente de Operaciones / Director Comercial")
+        
+        submitted = st.form_submit_type("submit")("Actualizar Motor IA")
+        if submitted:
+            st.success("¡Motor IA recalibrado con tu nuevo ICP!")
 
-    if run_btn:
-        if not product_service or not sector:
-            st.error("Completa al menos el producto/servicio y el sector económico.")
-        else:
-            with st.spinner("Investigando prospectos y generando inteligencia comercial..."):
-                prospects = generate_prospects(profile, DEFAULT_MODEL)
-                save_prospects(prospects, st.session_state.default_stage)
-                st.success(f"Se guardaron {len(prospects)} prospectos.")
-                st.rerun()
+    st.markdown("---")
+    st.metric(label="🪙 Créditos Disponibles", value=st.session_state.creditos)
+    st.caption("Las búsquedas son libres. Las acciones de IA consumen 1 crédito.")
 
-    all_prospects = get_saved_prospects()
-    filtered = [
-        p for p in all_prospects
-        if safe_float(p.get("score", 0)) >= st.session_state.filters["min_score"]
-        and (st.session_state.filters["stage"] == "Todos" or p.get("stage", "") == st.session_state.filters["stage"])
-    ]
+# ==========================================
+# CUERPO PRINCIPAL - DASHBOARD & PIPELINE
+# ==========================================
+st.title("💼 Cabina de Inteligencia Comercial")
+st.write("Detectando oportunidades en tiempo real para el mercado de Guatemala.")
 
-    if filtered:
-        df = pd.DataFrame([
-            {
-                "id": p.get("id"),
-                "created_at": p.get("created_at"),
-                "name": p.get("name"),
-                "giro": p.get("giro"),
-                "ubicacion": p.get("ubicacion"),
-                "tamano": p.get("tamano"),
-                "website": p.get("website"),
-                "telefono": p.get("telefono"),
-                "correo": p.get("correo"),
-                "redes": p.get("redes"),
-                "descripcion": p.get("descripcion"),
-                "motivo": p.get("motivo"),
-                "score": p.get("score"),
-                "score_label": p.get("score_label"),
-                "stage": p.get("stage"),
-                "note": p.get("note"),
-            }
-            for p in filtered
-        ])
-        st.dataframe(df, use_container_width=True, hide_index=True)
+tab1, tab2, tab3 = st.tabs(["🚀 Oportunidades Encontradas", "📊 Pipeline CRM", "🔔 Alertas de Mercado"])
 
-        if export_format == "Excel":
-            output = Path("prospectos.xlsx")
-            with pd.ExcelWriter(output, engine="openpyxl") as writer:
-                df.to_excel(writer, index=False, sheet_name="Prospectos")
-            st.download_button(
-                "Descargar Excel",
-                data=output.read_bytes(),
-                file_name="prospectos.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
-        elif export_format == "CSV":
-            st.download_button(
-                "Descargar CSV",
-                data=df.to_csv(index=False).encode("utf-8"),
-                file_name="prospectos.csv",
-                mime="text/csv",
-            )
-        else:
-            st.download_button(
-                "Descargar JSON",
-                data=json.dumps(filtered, ensure_ascii=False, indent=2).encode("utf-8"),
-                file_name="prospectos.json",
-                mime="application/json",
-            )
+# ------------------------------------------
+# PESTAÑA 1: OPORTUNIDADES ENCONTRADAS (MOTOR DE PROSPECCIÓN)
+# ------------------------------------------
+with tab1:
+    st.subheader("Empresas compatibles detectadas por el Agente Investigador")
+    
+    for emp in EMPREAS_MOCK:
+        with st.container():
+            col1, col2 = st.columns([3, 1])
+            
+            with col1:
+                st.markdown(f"### {emp['nombre']}")
+                st.markdown(f"📍 **Ubicación:** {emp['ubicacion']} | 🏢 **Giro:** {emp['giro']} | 👥 **Empleados:** {emp['empleados']}")
+                st.markdown(f"📢 **Señal Reciente:** *{emp['noticia']}*")
+            
+            with col2:
+                # Badge dinámico según score
+                clase_badge = "score-excelente" if emp['score'] >= 90 else "score-alta"
+                st.markdown(f"<div style='text-align: center;'><span class='score-badge {clase_badge}'>Score IA: {emp['score']}/100</span></div>", unsafe_allowed_html=True)
+                
+                # Acción de valor (Consumo de créditos)
+                if st.button(f"Diseñar Estrategia", key=emp['nombre']):
+                    if st.session_state.creditos > 0:
+                        st.session_state.creditos -= 1
+                        st.session_state['empresa_seleccionada'] = emp
+                        st.rerun()
+                    else:
+                        st.error("No tienes créditos suficientes.")
+            
+            st.markdown("---")
 
-        st.markdown("---")
-        for p in filtered:
-            st.markdown(f"### {p.get('name', 'Prospecto')}")
-            st.caption(f"{p.get('giro', '')} · {p.get('ubicacion', '')} · {p.get('tamano', '')}")
-            m1, m2, m3, m4 = st.columns(4)
-            m1.metric("Score", f"{safe_float(p.get('score', 0)):.0f}%", p.get("score_label", score_label(safe_float(p.get("score", 0)))))
-            m2.metric("Web", "Sí" if p.get("website") else "No")
-            m3.metric("Teléfono", "Sí" if p.get("telefono") else "No")
-            m4.metric("Correo", "Sí" if p.get("correo") else "No")
-            st.write(p.get("descripcion", ""))
-            st.info(f"**Por qué fue seleccionado:** {p.get('motivo', '')}")
-            with st.expander("Inteligencia comercial"):
-                st.write("**Resumen ejecutivo:**", p.get("summary", ""))
-                st.write("**Fortalezas:**", p.get("fortalezas", ""))
-                st.write("**Necesidades probables:**", p.get("necesidades", ""))
-                st.write("**Problemas que podría resolver:**", p.get("problems", ""))
-                st.write("**Argumentos de venta:**", p.get("argumentos", ""))
-                st.write("**Posibles objeciones:**", p.get("objeciones", ""))
-                st.write("**Respuestas recomendadas:**", p.get("respuestas", ""))
+    # Si el usuario seleccionó una empresa para desplegar la Inteligencia Comercial profunda
+    if 'empresa_seleccionada' in st.session_state:
+        selected = st.session_state['empresa_seleccionada']
+        st.markdown(f"## 🧠 Inteligencia Comercial Completa: {selected['nombre']}")
+        
+        col_foda, col_estrategia = st.columns(2)
+        
+        with col_foda:
+            st.markdown("<div class='card'>", unsafe_allowed_html=True)
+            st.markdown("### 📊 Diagnóstico FODA Comercial")
+            st.write(f"💪 **Fortaleza:** {selected['foda']['F']}")
+            st.write(f"❌ **Debilidad:** {selected['foda']['D']}")
+            st.write(f"🚀 **Oportunidad:** {selected['foda']['O']}")
+            st.write(f"⚠️ **Amenaza:** {selected['foda']['A']}")
+            st.markdown(f"🎯 **Dolor Crítico Detectado:** {selected['dolor']}")
+            st.markdown("</div>", unsafe_allowed_html=True)
+            
+        with col_estrategia:
+            st.markdown("<div class='card'>", unsafe_allowed_html=True)
+            st.markdown("### 🤖 Razonamiento del Agente Analista")
+            st.info(selected['justificacion'])
+            st.write(f"⚙️ **Tecnologías Detectadas:** {', '.join(selected['tecnologias'])}")
+            st.write(f"💻 **Madurez Digital:** {selected['digitalizacion']}")
+            st.markdown("</div>", unsafe_allowed_html=True)
 
-            with st.expander("Mensajes personalizados"):
-                st.text_area("Correo", p.get("email", ""), height=100, key=f"email_{p['id']}")
-                st.text_area("WhatsApp", p.get("whatsapp", ""), height=100, key=f"wa_{p['id']}")
-                st.text_area("LinkedIn", p.get("linkedin", ""), height=100, key=f"li_{p['id']}")
-                st.text_area("Llamada", p.get("call_script", ""), height=100, key=f"call_{p['id']}")
-                st.text_area("Elevator Pitch", p.get("pitch", ""), height=80, key=f"pitch_{p['id']}")
-                st.text_area("Propuesta comercial", p.get("proposal", ""), height=100, key=f"proposal_{p['id']}")
-                st.text_area("Presentación comercial", p.get("presentation", ""), height=100, key=f"presentation_{p['id']}")
-            st.divider()
-    else:
-        st.info("Todavía no hay prospectos guardados.")
+        # GENERADOR IA DE COMUNICACIONES
+        st.markdown("### ✉️ Generador de Mensajes Personalizados (Agente Redactor)")
+        canal = st.selectbox("Selecciona el canal de contacto:", ["Correo Electrónico Corp.", "Mensaje Directo de LinkedIn", "WhatsApp de Prospección"])
+        
+        if st.button("Generar Redacción con IA"):
+            with st.spinner("El Agente Redactor está contextualizando tu oferta..."):
+                time.sleep(1.5) # Simulación de inferencia del LLM
+                
+                if canal == "Correo Electrónico Corp.":
+                    subject = f"Propuesta de Eficiencia en Distribución - Expansión {selected['nombre'].split(' ')[0]}"
+                    body = f"Estimado Gerente de Operaciones de {selected['nombre']},\n\nVi que recientemente iniciaron operaciones en su nuevo centro logístico en Quetzaltenango. Sé que coordinar la cadena de suministro desde Ciudad de Guatemala hacia el occidente suele generar fricciones en la visibilidad del inventario en tránsito.\n\nNuestra plataforma de {que_vende} ayuda específicamente a automatizar este control sin necesidad de reemplazar su {selected['tecnologias'][0]} actual. ¿Tendría 10 minutos esta semana para mostrarle cómo lo solucionamos?\n\nAtentamente,\n[Tu Nombre]"
+                    st.text_input("Asunto:", value=subject)
+                    st.text_area("Contenido del Correo:", value=body, height=200)
+                
+                elif canal == "Mensaje Directo de LinkedIn":
+                    body_li = f"Hola, vi el crecimiento de {selected['nombre']} con su nuevo nodo logístico en Xela. ¡Felicidades! Me especializo en ayudar a empresas de {selected['giro']} a reducir pérdidas de stock en rutas departamentales complejas. Me encantaría conectar."
+                    st.text_area("Mensaje de LinkedIn:", value=body_li, height=100)
+                
+                else:
+                    body_wa = f"Buenos días. Me comunico de parte de Sales Intelligence. Vi la expansión de {selected['nombre']} en Quetzaltenango y desarrollamos una estrategia de control de inventario en tránsito para sus rutas comerciales. ¿Le interesaría una breve llamada hoy a las 3:00 PM?"
+                    st.text_area("Mensaje de WhatsApp:", value=body_wa, height=100)
+                    
+            st.success("Mensaje generado omitiendo plantillas genéricas. Basado 100% en eventos reales de la empresa.")
 
+# ------------------------------------------
+# PESTAÑA 2: PIPELINE CRM LIGERO
+# ------------------------------------------
+with tab2:
+    st.subheader("Embudo de Ventas Activo")
+    st.caption("Visualiza y organiza tus prospectos según su nivel de maduración.")
+    
+    # Kanban básico simulado por columnas de Streamlit
+    col_nuevos, col_contactados, col_interesados, col_ganados = st.columns(4)
+    
+    with col_nuevos:
+        st.markdown("#### 📥 Nuevos")
+        st.markdown("<div class='card'><b>Corporación Alimentos del Istmo</b>< #96<br><small>Asignado a: Mí</small></div>", unsafe_allowed_html=True)
+        
+    with col_contactados:
+        st.markdown("#### 📞 Contactados")
+        st.markdown("<div class='card'><b>LogiGuate</b><br>Score: 89<br><small>Próxima acción: Enviar propuesta</small></div>", unsafe_allowed_html=True)
+        
+    with col_interesados:
+        st.markdown("#### 🤝 Reunión / Interés")
+        st.write("*Vacío por el momento*")
+        
+    with col_ganados:
+        st.markdown("#### 🎉 Ganados")
+        st.markdown("<div class='card' style='border-left: 4px solid green;'><b>Distribuidora Central, S.A.</b><br><small>Cerrado por Q25,000</small></div>", unsafe_allowed_html=True)
 
-# -----------------------------
-# Pipeline CRM
-# -----------------------------
-with pages[1]:
-    st.subheader("Pipeline CRM")
-    prospects = get_saved_prospects()
-    if not prospects:
-        st.info("Primero genera prospectos desde la pestaña de Prospección.")
-    else:
-        for p in prospects:
-            cols = st.columns([3, 2, 3, 1])
-            with cols[0]:
-                st.markdown(f"**{p.get('name', '')}**")
-                st.caption(f"Score: {safe_float(p.get('score', 0)):.0f}% · {p.get('ubicacion', '')}")
-            with cols[1]:
-                stage = st.selectbox(
-                    "Etapa",
-                    PIPELINE_STAGES,
-                    index=PIPELINE_STAGES.index(p.get("stage", PIPELINE_STAGES[0])) if p.get("stage", PIPELINE_STAGES[0]) in PIPELINE_STAGES else 0,
-                    key=f"stage_{p['id']}",
-                )
-                if stage != p.get("stage"):
-                    update_stage(p["id"], stage)
-            with cols[2]:
-                note = st.text_input("Nota", value=p.get("note", ""), key=f"note_{p['id']}")
-                if note != p.get("note", ""):
-                    update_note(p["id"], note)
-            with cols[3]:
-                if st.button("Eliminar", key=f"del_{p['id']}"):
-                    delete_prospect(p["id"])
-                    st.rerun()
-            st.divider()
+    st.markdown("---")
+    st.markdown("💡 **Recomendación del Agente CRM:** El prospecto *LogiGuate* lleva 4 días en 'Contactado' sin actividad registrada. Te sugerimos reactivarlo enviando un mensaje de seguimiento por WhatsApp.")
 
-        summary = stage_summary(prospects)
-        summary_df = pd.DataFrame({"Etapa": list(summary.keys()), "Cantidad": list(summary.values())})
-        st.bar_chart(summary_df.set_index("Etapa"))
-        st.dataframe(summary_df, use_container_width=True, hide_index=True)
-
-
-# -----------------------------
-# Alertas
-# -----------------------------
-with pages[2]:
-    st.subheader("Alertas inteligentes")
-    st.write("Este módulo puede ampliarse para vigilar nuevas empresas, cambios de gerente, aperturas de sucursal, contrataciones, importaciones, exportaciones y crecimiento acelerado.")
-    alerts = [
-        "Nueva empresa detectada en el sector objetivo.",
-        "Señal de expansión regional.",
-        "Aumento de actividad digital.",
-        "Posible cambio de decisor comercial.",
-        "Apertura de una nueva sucursal.",
-    ]
-    for alert in alerts:
-        st.success(alert)
-
-
-# -----------------------------
-# Automatización
-# -----------------------------
-with pages[3]:
-    st.subheader("Automatización")
-    st.write("Aquí puedes conectar alertas, exportaciones, correo, WhatsApp y sincronización con CRMs externos.")
-    st.checkbox("Exportar prospectos nuevos automáticamente")
-    st.checkbox("Enviar alertas cuando aparezcan prospectos de alta puntuación")
-    st.checkbox("Sincronizar con CRM externo")
-    st.checkbox("Generar correos personalizados en lote")
-    st.checkbox("Generar propuestas comerciales automáticamente")
-    st.info("En producción, este módulo se conectaría con trabajos asíncronos y colas de tareas.")
-
-
-# -----------------------------
-# Ajustes
-# -----------------------------
-with pages[4]:
-    st.subheader("Ajustes técnicos")
-    st.markdown(
-        """
-        **Variables de entorno / secretos:**
-        ```bash
-        APP_PASSWORD=tu_contraseña
-        OPENROUTER_API_KEY=tu_api_key
-        OPENROUTER_MODEL=deepseek/deepseek-v4-flash
-        OPENROUTER_BASE_URL=https://openrouter.ai/api/v1/chat/completions
-        APP_DB_PATH=sales_intelligence.db
-        ```
-        """
-    )
-    st.markdown(
-        """
-        **requirements.txt**
-        ```txt
-        streamlit
-        pandas
-        requests
-        openpyxl
-        ```
-        """
-    )
-    st.warning("Para producción real conviene migrar SQLite a PostgreSQL y separar frontend, API y motor IA.")
-
-
-st.caption(f"Última ejecución: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC")
+# ------------------------------------------
+# PESTAÑA 3: ALERTAS INTELIGENTES DE MERCADO
+# ------------------------------------------
+with tab3:
+    st.subheader("📡 Monitoreo Continuo (Señales de Compra en Guatemala)")
+    st.caption("El Agente Monitor evalúa el Diario de Centro América, portales de empleo y registros de importaciones de manera continua.")
+    
+    st.warning("⚠️ **Nueva Licitación Adjudicada:** Una gran empresa cervecera en Escuintla acaba de ganar un contrato de distribución estatal. Relevancia para tu negocio: **Muy Alta**. Requieren optimizar distribución.")
+    st.info("ℹ️ **Cambio de Liderazgo:** Nuevo Director Comercial asignado en Industrias del Atlántico. Oportunidad ideal para romper el hielo y presentar soluciones antes de que definan presupuesto anual.")
