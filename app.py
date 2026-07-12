@@ -1,212 +1,404 @@
-import streamlit as st
-import time
-import random
+import os
+from dataclasses import dataclass, asdict
+from typing import Any, Dict, List, Optional
 
-# ==========================================
-# CONFIGURACIÓN DE LA PÁGINA Y ESTILOS
-# ==========================================
+import pandas as pd
+import requests
+import streamlit as st
+
+
+# =========================================================
+# STREAMLIT APP: INTELIGENCIA COMERCIAL REAL
+# - Sin datos simulados
+# - Sin créditos
+# - Sin pagos
+# - Sin autenticación
+# =========================================================
+
 st.set_page_config(
     page_title="Sales Intelligence Guatemala",
     page_icon="💼",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded",
 )
 
-# Estilos CSS personalizados para simular el look-and-feel de shadcn/ui
-st.markdown("""
-<style>
-    .reportview-container { background: #f8fafc; }
-    .stMetric { background-color: #ffffff; padding: 15px; border-radius: 8px; border: 1px solid #e2e8f0; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }
-    .card { background-color: #ffffff; padding: 20px; border-radius: 8px; border: 1px solid #e2e8f0; margin-bottom: 15px; }
-    .score-badge { padding: 5px 12px; border-radius: 20px; font-weight: bold; font-size: 14px; display: inline-block; }
-    .score-excelente { background-color: #dcfce7; color: #166534; }
-    .score-alta { background-color: #fef9c3; color: #854d0e; }
-</style>
-""", unsafe_allowed_html=True)
+st.markdown(
+    """
+    <style>
+        .block-container { padding-top: 1.2rem; }
+        .small-muted { color: #6b7280; font-size: 0.92rem; }
+        .card {
+            background: #ffffff;
+            border: 1px solid #e5e7eb;
+            border-radius: 16px;
+            padding: 1rem 1rem 0.9rem 1rem;
+            box-shadow: 0 1px 2px rgba(0,0,0,.04);
+            margin-bottom: 0.9rem;
+        }
+        .badge {
+            display: inline-block;
+            padding: 0.25rem 0.65rem;
+            border-radius: 999px;
+            font-size: 0.8rem;
+            font-weight: 600;
+            margin-right: 0.4rem;
+            margin-bottom: 0.25rem;
+            border: 1px solid #e5e7eb;
+            background: #f9fafb;
+        }
+        .badge-high { background: #ecfdf5; border-color: #a7f3d0; color: #065f46; }
+        .badge-med { background: #fffbeb; border-color: #fde68a; color: #92400e; }
+        .badge-low { background: #f3f4f6; border-color: #d1d5db; color: #374151; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
-# ==========================================
-# SIMULACIÓN DE DATOS (MOCK DATA)
-# ==========================================
-if 'creditos' not in st.session_state:
-    st.session_state.creditos = 150
 
-# Empresas precargadas (Base de conocimiento RAG simulada)
-EMPRESAS_MOCK = [
-    {
-        "nombre": "Corporación Alimentos del Istmo S.A.",
-        "giro": "Manufactura y Distribución de Alimentos",
-        "ubicacion": "Zona 12, Ciudad de Guatemala",
-        "empleados": "350+",
-        "digitalizacion": "Media (Sitio web básico, sin píxeles de conversión avanzados)",
-        "noticia": "Abriendo nuevo centro de distribución logística en Quetzaltenango (Xela).",
-        "tecnologias": ["SAP ERP", "Microsoft 365", "Google Analytics"],
-        "score": 96,
-        "justificacion": "Match crítico: Buscan expandir operaciones a Xela y carecen de software de optimización de rutas o CRM avanzado para coordinar equipos remotos.",
-        "dolor": "Falta de visibilidad en tiempo real del inventario en tránsito hacia los departamentos.",
-        "foda": {"F": "Liderazgo en el mercado local", "D": "Procesos de ventas manuales", "O": "Apertura en el occidente del país", "A": "Competencia internacional con mejor tecnología"}
-    },
-    {
-        "nombre": "Logística y Transportes de Guatemala (LogiGuate)",
-        "giro": "Transporte de Carga y Cadena de Suministro",
-        "ubicacion": "Siquinalá, Escuintla",
-        "empleados": "120",
-        "digitalizacion": "Alta (GPS corporativo, pasarela de pagos básica)",
-        "noticia": "Recibió inversión de fondo regional para modernización de flota.",
-        "tecnologias": ["WordPress", "Meta Pixel", "HubSpot Free"],
-        "score": 89,
-        "justificacion": "Alta compatibilidad: Cuentan con capital reciente para inversión tecnológica y ya usan herramientas de marketing, facilitando la venta de integraciones avanzadas.",
-        "dolor": "Alta tasa de rotación en ejecutivos de cuentas clave y demora en cotizaciones complejas.",
-        "foda": {"F": "Flota moderna", "D": "Cuellos de botella en atención al cliente", "O": "Automatización de cotizaciones", "A": "Fluctuación del precio del combustible"}
-    }
-]
+@dataclass
+class Prospect:
+    name: str
+    sector: str = ""
+    location: str = ""
+    size: str = ""
+    website: str = ""
+    source: str = ""
+    signal: str = ""
+    rationale: str = ""
+    pain_point: str = ""
+    score: int = 0
+    technologies: Optional[List[str]] = None
+    evidence: Optional[List[str]] = None
+    stage: str = "Nuevo"
+    next_step: str = ""
 
-# ==========================================
-# BARRA LATERAL (SIDEBAR) - ONBOARDING / ICP
-# ==========================================
+    def __post_init__(self) -> None:
+        if self.technologies is None:
+            self.technologies = []
+        if self.evidence is None:
+            self.evidence = []
+
+
+def env(name: str, default: str = "") -> str:
+    return os.getenv(name, default).strip()
+
+
+def get_query_tokens(text: str) -> List[str]:
+    return [t.strip() for t in text.split(",") if t.strip()]
+
+
+def score_prospect(prospect: Dict[str, Any], query: Dict[str, Any]) -> int:
+    score = 0
+    sector = (prospect.get("sector") or "").lower()
+    location = (prospect.get("location") or "").lower()
+    signal = (prospect.get("signal") or "").lower()
+    rationale = (prospect.get("rationale") or "").lower()
+    evidence = prospect.get("evidence") or []
+
+    target_sectors = [s.lower() for s in query.get("target_sectors", [])]
+    target_locations = [s.lower() for s in query.get("target_locations", [])]
+    keywords = [s.lower() for s in query.get("keywords", [])]
+
+    if any(ts and ts in sector for ts in target_sectors):
+        score += 30
+    if any(tl and tl in location for tl in target_locations):
+        score += 20
+    if any(k and (k in signal or k in rationale) for k in keywords):
+        score += 25
+    if prospect.get("website"):
+        score += 10
+    score += min(len(evidence) * 3, 15)
+
+    return min(score, 100)
+
+
+def google_custom_search(query: str, num: int = 10) -> List[Dict[str, Any]]:
+    api_key = env("GOOGLE_CSE_API_KEY")
+    cse_id = env("GOOGLE_CSE_ID")
+    if not api_key or not cse_id:
+        return []
+
+    url = "https://www.googleapis.com/customsearch/v1"
+    params = {"key": api_key, "cx": cse_id, "q": query, "num": min(num, 10)}
+    try:
+        r = requests.get(url, params=params, timeout=20)
+        r.raise_for_status()
+        data = r.json()
+    except Exception:
+        return []
+
+    results: List[Dict[str, Any]] = []
+    for item in data.get("items", []):
+        results.append(
+            {
+                "title": item.get("title", ""),
+                "link": item.get("link", ""),
+                "snippet": item.get("snippet", ""),
+                "source": "Google Custom Search",
+            }
+        )
+    return results
+
+
+def newsapi_search(query: str, page_size: int = 10) -> List[Dict[str, Any]]:
+    api_key = env("NEWSAPI_KEY")
+    if not api_key:
+        return []
+
+    url = "https://newsapi.org/v2/everything"
+    headers = {"X-Api-Key": api_key}
+    params = {"q": query, "pageSize": min(page_size, 10), "language": "es"}
+    try:
+        r = requests.get(url, headers=headers, params=params, timeout=20)
+        r.raise_for_status()
+        data = r.json()
+    except Exception:
+        return []
+
+    results: List[Dict[str, Any]] = []
+    for item in data.get("articles", []):
+        results.append(
+            {
+                "title": item.get("title", ""),
+                "link": item.get("url", ""),
+                "snippet": item.get("description", ""),
+                "source": item.get("source", {}).get("name", "NewsAPI"),
+                "publishedAt": item.get("publishedAt", ""),
+            }
+        )
+    return results
+
+
+def build_prospect_from_result(result: Dict[str, Any], query: Dict[str, Any]) -> Prospect:
+    title = (result.get("title") or "").strip()
+    link = (result.get("link") or "").strip()
+    snippet = (result.get("snippet") or "").strip()
+    source = (result.get("source") or "Fuente real").strip()
+
+    sector = query.get("primary_sector", "")
+    location = ", ".join(query.get("target_locations", [])) if query.get("target_locations") else ""
+
+    return Prospect(
+        name=title or "Resultado sin título",
+        sector=sector,
+        location=location,
+        website=link,
+        source=source,
+        signal=snippet,
+        rationale="Coincide con la búsqueda definida por el usuario y aparece en una fuente real recuperada por la integración.",
+        pain_point="Por confirmar con más evidencia en fuentes conectadas.",
+        evidence=[snippet] if snippet else [],
+        technologies=[],
+    )
+
+
+if "pipeline" not in st.session_state:
+    st.session_state.pipeline = []
+
+if "selected_prospect" not in st.session_state:
+    st.session_state.selected_prospect = None
+
+
 with st.sidebar:
-    st.image("https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=100&auto=format&fit=crop", width=60) # Decorativo institucional
-    st.title("Sales Intelligence GT")
-    st.caption("Tu Asistente de Ventas IA 24/7")
+    st.title("💼 Sales Intelligence GT")
+    st.caption("Inteligencia comercial real para Streamlit Cloud")
     st.markdown("---")
-    
-    st.subheader("🎯 Perfil de Tu Empresa (ICP)")
-    with st.form("icp_form"):
-        que_vende = st.text_input("¿Qué deseas vender?", value="Software ERP de Logística e Inventarios")
-        sector_target = st.multiselect("Sectores Objetivo", ["Consumo Masivo", "Logística", "Servicios", "Tecnología"], default=["Consumo Masivo", "Logística"])
-        tamaño_target = st.slider("Tamaño de empresa ideal (Empleados)", 10, 500, (50, 400))
-        decisor = st.text_input("Cargo del decisor político", value="Gerente de Operaciones / Director Comercial")
-        
-        submitted = st.form_submit_type("submit")("Actualizar Motor IA")
-        if submitted:
-            st.success("¡Motor IA recalibrado con tu nuevo ICP!")
+
+    st.subheader("Perfil de búsqueda")
+    with st.form("search_form", clear_on_submit=False):
+        product = st.text_input("¿Qué deseas vender?", placeholder="Ej. software ERP, impresión digital, consultoría, etc.")
+        primary_sector = st.text_input("Sector principal", placeholder="Ej. logística")
+        target_sectors_raw = st.text_input("Sectores objetivo", placeholder="Ej. logística, manufactura, retail")
+        target_locations_raw = st.text_input("Cobertura geográfica", placeholder="Ej. Ciudad de Guatemala, Escuintla")
+        size = st.text_input("Tamaño objetivo", placeholder="Ej. 50-400 empleados")
+        keyword_raw = st.text_input("Señales / palabras clave", placeholder="Ej. expansión, contratación, nueva sucursal")
+        limit = st.slider("Máximo de resultados por fuente", 5, 20, 10)
+        submitted = st.form_submit_button("Buscar prospectos reales")
 
     st.markdown("---")
-    st.metric(label="🪙 Créditos Disponibles", value=st.session_state.creditos)
-    st.caption("Las búsquedas son libres. Las acciones de IA consumen 1 crédito.")
+    st.subheader("Fuentes conectadas")
+    st.write("Google Custom Search:", "✅" if env("GOOGLE_CSE_API_KEY") and env("GOOGLE_CSE_ID") else "⚪ no configurada")
+    st.write("NewsAPI:", "✅" if env("NEWSAPI_KEY") else "⚪ no configurada")
+    st.caption("Si no configuras APIs, la app no mostrará datos ficticios.")
 
-# ==========================================
-# CUERPO PRINCIPAL - DASHBOARD & PIPELINE
-# ==========================================
-st.title("💼 Cabina de Inteligencia Comercial")
-st.write("Detectando oportunidades en tiempo real para el mercado de Guatemala.")
 
-tab1, tab2, tab3 = st.tabs(["🚀 Oportunidades Encontradas", "📊 Pipeline CRM", "🔔 Alertas de Mercado"])
+st.title("Cabina de Inteligencia Comercial")
+st.write(
+    "La aplicación busca y prioriza prospectos reales a partir de fuentes conectadas. No usa mock data, créditos, pagos ni autenticación."
+)
 
-# ------------------------------------------
-# PESTAÑA 1: OPORTUNIDADES ENCONTRADAS (MOTOR DE PROSPECCIÓN)
-# ------------------------------------------
+query_cfg: Dict[str, Any] = {}
+if submitted:
+    target_sectors = get_query_tokens(target_sectors_raw)
+    target_locations = get_query_tokens(target_locations_raw)
+    keywords = get_query_tokens(keyword_raw)
+
+    query_cfg = {
+        "product": product,
+        "primary_sector": primary_sector,
+        "target_sectors": target_sectors,
+        "target_locations": target_locations,
+        "size": size,
+        "keywords": keywords,
+    }
+
+    search_parts = [product, primary_sector, " ".join(target_sectors), " ".join(target_locations), " ".join(keywords)]
+    search_query = " ".join([p for p in search_parts if p]).strip()
+
+    if not search_query:
+        st.warning("Completa al menos el producto o un criterio de búsqueda.")
+    else:
+        with st.spinner("Consultando fuentes reales..."):
+            google_results = google_custom_search(search_query, num=limit)
+            news_results = newsapi_search(search_query, page_size=limit)
+
+            combined: List[Dict[str, Any]] = []
+            combined.extend(google_results)
+            combined.extend(news_results)
+
+            prospects: List[Prospect] = []
+            for result in combined:
+                p = build_prospect_from_result(result, query_cfg)
+                p.score = score_prospect(asdict(p), query_cfg)
+                prospects.append(p)
+
+            prospects = sorted(prospects, key=lambda x: x.score, reverse=True)
+            st.session_state.pipeline = [asdict(p) for p in prospects]
+            st.session_state.selected_prospect = st.session_state.pipeline[0] if st.session_state.pipeline else None
+
+
+tab1, tab2, tab3 = st.tabs(["Prospectos reales", "Pipeline", "Mensajes"])
+
+
 with tab1:
-    st.subheader("Empresas compatibles detectadas por el Agente Investigador")
-    
-    for emp in EMPREAS_MOCK:
-        with st.container():
-            col1, col2 = st.columns([3, 1])
-            
+    st.subheader("Prospectos encontrados")
+    if not st.session_state.pipeline:
+        st.info("No hay prospectos cargados todavía. Conecta una API real y ejecuta una búsqueda.")
+        st.markdown(
+            """
+            <div class="card">
+                <strong>Estado vacío honesto</strong><br>
+                La aplicación no muestra empresas ficticias ni señales simuladas.
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    else:
+        for i, prospect in enumerate(st.session_state.pipeline):
+            st.markdown('<div class="card">', unsafe_allow_html=True)
+            col1, col2 = st.columns([4, 1])
             with col1:
-                st.markdown(f"### {emp['nombre']}")
-                st.markdown(f"📍 **Ubicación:** {emp['ubicacion']} | 🏢 **Giro:** {emp['giro']} | 👥 **Empleados:** {emp['empleados']}")
-                st.markdown(f"📢 **Señal Reciente:** *{emp['noticia']}*")
-            
+                st.markdown(f"### {prospect.get('name', '')}")
+                meta = []
+                if prospect.get("sector"):
+                    meta.append(f"Sector: {prospect['sector']}")
+                if prospect.get("location"):
+                    meta.append(f"Ubicación: {prospect['location']}")
+                if prospect.get("source"):
+                    meta.append(f"Fuente: {prospect['source']}")
+                if meta:
+                    st.write(" | ".join(meta))
+                if prospect.get("signal"):
+                    st.markdown(f"**Señal observada:** {prospect['signal']}")
+                if prospect.get("rationale"):
+                    st.markdown(f"**Razón de encaje:** {prospect['rationale']}")
+                if prospect.get("pain_point"):
+                    st.markdown(f"**Dolor probable:** {prospect['pain_point']}")
+                if prospect.get("website"):
+                    st.markdown(f"[Abrir fuente / sitio]({prospect['website']})")
+                if prospect.get("technologies"):
+                    st.caption(f"Tecnologías detectadas: {', '.join(prospect['technologies'])}")
             with col2:
-                # Badge dinámico según score
-                clase_badge = "score-excelente" if emp['score'] >= 90 else "score-alta"
-                st.markdown(f"<div style='text-align: center;'><span class='score-badge {clase_badge}'>Score IA: {emp['score']}/100</span></div>", unsafe_allowed_html=True)
-                
-                # Acción de valor (Consumo de créditos)
-                if st.button(f"Diseñar Estrategia", key=emp['nombre']):
-                    if st.session_state.creditos > 0:
-                        st.session_state.creditos -= 1
-                        st.session_state['empresa_seleccionada'] = emp
-                        st.rerun()
-                    else:
-                        st.error("No tienes créditos suficientes.")
-            
-            st.markdown("---")
+                score = int(prospect.get("score", 0))
+                badge_class = "badge-high" if score >= 75 else "badge-med" if score >= 45 else "badge-low"
+                st.markdown(f'<span class="badge {badge_class}">Score {score}/100</span>', unsafe_allow_html=True)
+                if st.button("Seleccionar", key=f"sel_{i}"):
+                    st.session_state.selected_prospect = prospect
+                    st.success("Prospecto seleccionado.")
+            st.markdown("</div>", unsafe_allow_html=True)
 
-    # Si el usuario seleccionó una empresa para desplegar la Inteligencia Comercial profunda
-    if 'empresa_seleccionada' in st.session_state:
-        selected = st.session_state['empresa_seleccionada']
-        st.markdown(f"## 🧠 Inteligencia Comercial Completa: {selected['nombre']}")
-        
-        col_foda, col_estrategia = st.columns(2)
-        
-        with col_foda:
-            st.markdown("<div class='card'>", unsafe_allowed_html=True)
-            st.markdown("### 📊 Diagnóstico FODA Comercial")
-            st.write(f"💪 **Fortaleza:** {selected['foda']['F']}")
-            st.write(f"❌ **Debilidad:** {selected['foda']['D']}")
-            st.write(f"🚀 **Oportunidad:** {selected['foda']['O']}")
-            st.write(f"⚠️ **Amenaza:** {selected['foda']['A']}")
-            st.markdown(f"🎯 **Dolor Crítico Detectado:** {selected['dolor']}")
-            st.markdown("</div>", unsafe_allowed_html=True)
-            
-        with col_estrategia:
-            st.markdown("<div class='card'>", unsafe_allowed_html=True)
-            st.markdown("### 🤖 Razonamiento del Agente Analista")
-            st.info(selected['justificacion'])
-            st.write(f"⚙️ **Tecnologías Detectadas:** {', '.join(selected['tecnologias'])}")
-            st.write(f"💻 **Madurez Digital:** {selected['digitalizacion']}")
-            st.markdown("</div>", unsafe_allowed_html=True)
 
-        # GENERADOR IA DE COMUNICACIONES
-        st.markdown("### ✉️ Generador de Mensajes Personalizados (Agente Redactor)")
-        canal = st.selectbox("Selecciona el canal de contacto:", ["Correo Electrónico Corp.", "Mensaje Directo de LinkedIn", "WhatsApp de Prospección"])
-        
-        if st.button("Generar Redacción con IA"):
-            with st.spinner("El Agente Redactor está contextualizando tu oferta..."):
-                time.sleep(1.5) # Simulación de inferencia del LLM
-                
-                if canal == "Correo Electrónico Corp.":
-                    subject = f"Propuesta de Eficiencia en Distribución - Expansión {selected['nombre'].split(' ')[0]}"
-                    body = f"Estimado Gerente de Operaciones de {selected['nombre']},\n\nVi que recientemente iniciaron operaciones en su nuevo centro logístico en Quetzaltenango. Sé que coordinar la cadena de suministro desde Ciudad de Guatemala hacia el occidente suele generar fricciones en la visibilidad del inventario en tránsito.\n\nNuestra plataforma de {que_vende} ayuda específicamente a automatizar este control sin necesidad de reemplazar su {selected['tecnologias'][0]} actual. ¿Tendría 10 minutos esta semana para mostrarle cómo lo solucionamos?\n\nAtentamente,\n[Tu Nombre]"
-                    st.text_input("Asunto:", value=subject)
-                    st.text_area("Contenido del Correo:", value=body, height=200)
-                
-                elif canal == "Mensaje Directo de LinkedIn":
-                    body_li = f"Hola, vi el crecimiento de {selected['nombre']} con su nuevo nodo logístico en Xela. ¡Felicidades! Me especializo en ayudar a empresas de {selected['giro']} a reducir pérdidas de stock en rutas departamentales complejas. Me encantaría conectar."
-                    st.text_area("Mensaje de LinkedIn:", value=body_li, height=100)
-                
-                else:
-                    body_wa = f"Buenos días. Me comunico de parte de Sales Intelligence. Vi la expansión de {selected['nombre']} en Quetzaltenango y desarrollamos una estrategia de control de inventario en tránsito para sus rutas comerciales. ¿Le interesaría una breve llamada hoy a las 3:00 PM?"
-                    st.text_area("Mensaje de WhatsApp:", value=body_wa, height=100)
-                    
-            st.success("Mensaje generado omitiendo plantillas genéricas. Basado 100% en eventos reales de la empresa.")
-
-# ------------------------------------------
-# PESTAÑA 2: PIPELINE CRM LIGERO
-# ------------------------------------------
 with tab2:
-    st.subheader("Embudo de Ventas Activo")
-    st.caption("Visualiza y organiza tus prospectos según su nivel de maduración.")
-    
-    # Kanban básico simulado por columnas de Streamlit
-    col_nuevos, col_contactados, col_interesados, col_ganados = st.columns(4)
-    
-    with col_nuevos:
-        st.markdown("#### 📥 Nuevos")
-        st.markdown("<div class='card'><b>Corporación Alimentos del Istmo</b>< #96<br><small>Asignado a: Mí</small></div>", unsafe_allowed_html=True)
-        
-    with col_contactados:
-        st.markdown("#### 📞 Contactados")
-        st.markdown("<div class='card'><b>LogiGuate</b><br>Score: 89<br><small>Próxima acción: Enviar propuesta</small></div>", unsafe_allowed_html=True)
-        
-    with col_interesados:
-        st.markdown("#### 🤝 Reunión / Interés")
-        st.write("*Vacío por el momento*")
-        
-    with col_ganados:
-        st.markdown("#### 🎉 Ganados")
-        st.markdown("<div class='card' style='border-left: 4px solid green;'><b>Distribuidora Central, S.A.</b><br><small>Cerrado por Q25,000</small></div>", unsafe_allowed_html=True)
+    st.subheader("Pipeline de trabajo")
+    st.caption("Seguimiento simple, sin CRM de pago, sin login y sin créditos.")
 
-    st.markdown("---")
-    st.markdown("💡 **Recomendación del Agente CRM:** El prospecto *LogiGuate* lleva 4 días en 'Contactado' sin actividad registrada. Te sugerimos reactivarlo enviando un mensaje de seguimiento por WhatsApp.")
+    pipeline_df = pd.DataFrame(st.session_state.pipeline)
+    if pipeline_df.empty:
+        st.info("Todavía no hay prospectos en el pipeline.")
+    else:
+        if "stage" not in pipeline_df.columns:
+            pipeline_df["stage"] = "Nuevo"
+        if "next_step" not in pipeline_df.columns:
+            pipeline_df["next_step"] = ""
 
-# ------------------------------------------
-# PESTAÑA 3: ALERTAS INTELIGENTES DE MERCADO
-# ------------------------------------------
+        edited = st.data_editor(
+            pipeline_df[["name", "score", "source", "stage", "next_step", "website"]],
+            use_container_width=True,
+            num_rows="dynamic",
+            hide_index=True,
+            column_config={
+                "stage": st.column_config.SelectboxColumn(
+                    "stage",
+                    options=["Nuevo", "Contactado", "Interesado", "Reunión", "Ganado", "Descartado"],
+                    required=True,
+                )
+            },
+        )
+        st.caption("Los cambios de esta vista se mantienen en la sesión actual.")
+
+        if st.button("Guardar cambios del pipeline"):
+            updated_pipeline = edited.to_dict(orient="records")
+            st.session_state.pipeline = updated_pipeline
+            st.success("Pipeline actualizado.")
+
+
 with tab3:
-    st.subheader("📡 Monitoreo Continuo (Señales de Compra en Guatemala)")
-    st.caption("El Agente Monitor evalúa el Diario de Centro América, portales de empleo y registros de importaciones de manera continua.")
-    
-    st.warning("⚠️ **Nueva Licitación Adjudicada:** Una gran empresa cervecera en Escuintla acaba de ganar un contrato de distribución estatal. Relevancia para tu negocio: **Muy Alta**. Requieren optimizar distribución.")
-    st.info("ℹ️ **Cambio de Liderazgo:** Nuevo Director Comercial asignado en Industrias del Atlántico. Oportunidad ideal para romper el hielo y presentar soluciones antes de que definan presupuesto anual.")
+    st.subheader("Mensajes personalizados")
+
+    prospect_dict = st.session_state.selected_prospect
+    if not prospect_dict and st.session_state.pipeline:
+        prospect_dict = st.session_state.pipeline[0]
+
+    if not prospect_dict:
+        st.info("Selecciona un prospecto para generar un mensaje.")
+    else:
+        col1, col2 = st.columns([1, 2])
+        with col1:
+            channel = st.selectbox("Canal", ["Correo", "LinkedIn", "WhatsApp"])
+            tone = st.selectbox("Tono", ["Profesional", "Directo", "Consultivo"])
+            generate = st.button("Generar mensaje")
+
+        with col2:
+            st.markdown(f"**Prospecto activo:** {prospect_dict.get('name', '')}")
+            if generate:
+                name = prospect_dict.get("name", "la empresa")
+                signal = prospect_dict.get("signal", "una señal reciente observada en fuente real")
+                product = env("DEFAULT_PRODUCT", "tu solución")
+
+                if channel == "Correo":
+                    body = (
+                        f"Hola, equipo de {name}:\n\n"
+                        f"Revisé {signal[:220]}. Creemos que {product} podría ayudarles a resolver una necesidad concreta relacionada con ese contexto.\n\n"
+                        f"¿Te parece si coordinamos 10 minutos para compartirte una propuesta breve?\n\n"
+                        f"Saludos,\n"
+                        f"[Tu nombre]"
+                    )
+                elif channel == "LinkedIn":
+                    body = (
+                        f"Hola, vi una señal reciente sobre {name} y me pareció una buena razón para conectar.\n"
+                        f"Trabajo con {product} y creo que podría ser relevante para su contexto actual."
+                    )
+                else:
+                    body = (
+                        f"Hola, soy [Tu nombre]. Vi una señal reciente sobre {name} y quería compartirte una idea corta sobre {product}.\n"
+                        f"¿Te puedo enviar 3 líneas por aquí?"
+                    )
+
+                st.text_area("Borrador", value=body, height=220)
+                st.caption(f"Tono sugerido: {tone}")
+
+
+st.markdown("---")
+st.caption(
+    "Para que la app funcione con datos reales en Streamlit Cloud, define al menos una fuente: GOOGLE_CSE_API_KEY + GOOGLE_CSE_ID, NEWSAPI_KEY u otra API real conectada."
+)
