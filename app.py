@@ -13,6 +13,7 @@ import streamlit as st
 # - Sin créditos
 # - Sin pagos
 # - Sin autenticación
+# - Fuente única: SerpAPI
 # =========================================================
 
 st.set_page_config(
@@ -26,7 +27,6 @@ st.markdown(
     """
     <style>
         .block-container { padding-top: 1.2rem; }
-        .small-muted { color: #6b7280; font-size: 0.92rem; }
         .card {
             background: #ffffff;
             border: 1px solid #e5e7eb;
@@ -49,6 +49,7 @@ st.markdown(
         .badge-high { background: #ecfdf5; border-color: #a7f3d0; color: #065f46; }
         .badge-med { background: #fffbeb; border-color: #fde68a; color: #92400e; }
         .badge-low { background: #f3f4f6; border-color: #d1d5db; color: #374151; }
+        .small-muted { color: #6b7280; font-size: 0.92rem; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -87,6 +88,94 @@ def get_query_tokens(text: str) -> List[str]:
     return [t.strip() for t in text.split(",") if t.strip()]
 
 
+def serpapi_search(query: str, engine: str = "google", num: int = 10) -> List[Dict[str, Any]]:
+    api_key = env("SERPAPI_KEY")
+    if not api_key or not query.strip():
+        return []
+
+    base_url = "https://serpapi.com/search.json"
+    params: Dict[str, Any] = {
+        "engine": engine,
+        "q": query,
+        "api_key": api_key,
+        "hl": "es",
+        "gl": "gt",
+        "num": min(max(num, 1), 10),
+    }
+
+    try:
+        r = requests.get(base_url, params=params, timeout=30)
+        r.raise_for_status()
+        data = r.json()
+    except Exception:
+        return []
+
+    results: List[Dict[str, Any]] = []
+
+    if engine == "google":
+        for item in data.get("organic_results", [])[:num]:
+            results.append(
+                {
+                    "title": item.get("title", ""),
+                    "link": item.get("link", ""),
+                    "snippet": item.get("snippet", ""),
+                    "source": "SerpAPI Google",
+                    "type": "organic",
+                }
+            )
+
+        for item in data.get("news_results", [])[: max(0, num // 2)]:
+            results.append(
+                {
+                    "title": item.get("title", ""),
+                    "link": item.get("link", ""),
+                    "snippet": item.get("snippet", "") or item.get("source", ""),
+                    "source": "SerpAPI News",
+                    "type": "news",
+                }
+            )
+
+    elif engine == "google_maps":
+        for item in data.get("local_results", [])[:num]:
+            results.append(
+                {
+                    "title": item.get("title", ""),
+                    "link": item.get("website", "") or item.get("link", ""),
+                    "snippet": item.get("address", "") or item.get("phone", ""),
+                    "source": "SerpAPI Maps",
+                    "type": "local",
+                }
+            )
+
+    return results
+
+
+def build_prospect_from_result(result: Dict[str, Any], query: Dict[str, Any]) -> Prospect:
+    title = (result.get("title") or "").strip()
+    link = (result.get("link") or "").strip()
+    snippet = (result.get("snippet") or "").strip()
+    source = (result.get("source") or "Fuente real").strip()
+
+    sector = query.get("primary_sector", "")
+    location = ", ".join(query.get("target_locations", [])) if query.get("target_locations") else ""
+
+    if not title:
+        title = "Resultado sin título"
+
+    return Prospect(
+        name=title,
+        sector=sector,
+        location=location,
+        website=link,
+        source=source,
+        signal=snippet,
+        rationale="Aparece en una consulta real de SerpAPI y coincide con el criterio de búsqueda definido por el usuario.",
+        pain_point="Por confirmar con más evidencia en el sitio o fuente recuperada.",
+        evidence=[snippet] if snippet else [],
+        technologies=[],
+    )
+
+
 def score_prospect(prospect: Dict[str, Any], query: Dict[str, Any]) -> int:
     score = 0
     sector = (prospect.get("sector") or "").lower()
@@ -112,86 +201,6 @@ def score_prospect(prospect: Dict[str, Any], query: Dict[str, Any]) -> int:
     return min(score, 100)
 
 
-def google_custom_search(query: str, num: int = 10) -> List[Dict[str, Any]]:
-    api_key = env("GOOGLE_CSE_API_KEY")
-    cse_id = env("GOOGLE_CSE_ID")
-    if not api_key or not cse_id:
-        return []
-
-    url = "https://www.googleapis.com/customsearch/v1"
-    params = {"key": api_key, "cx": cse_id, "q": query, "num": min(num, 10)}
-    try:
-        r = requests.get(url, params=params, timeout=20)
-        r.raise_for_status()
-        data = r.json()
-    except Exception:
-        return []
-
-    results: List[Dict[str, Any]] = []
-    for item in data.get("items", []):
-        results.append(
-            {
-                "title": item.get("title", ""),
-                "link": item.get("link", ""),
-                "snippet": item.get("snippet", ""),
-                "source": "Google Custom Search",
-            }
-        )
-    return results
-
-
-def newsapi_search(query: str, page_size: int = 10) -> List[Dict[str, Any]]:
-    api_key = env("NEWSAPI_KEY")
-    if not api_key:
-        return []
-
-    url = "https://newsapi.org/v2/everything"
-    headers = {"X-Api-Key": api_key}
-    params = {"q": query, "pageSize": min(page_size, 10), "language": "es"}
-    try:
-        r = requests.get(url, headers=headers, params=params, timeout=20)
-        r.raise_for_status()
-        data = r.json()
-    except Exception:
-        return []
-
-    results: List[Dict[str, Any]] = []
-    for item in data.get("articles", []):
-        results.append(
-            {
-                "title": item.get("title", ""),
-                "link": item.get("url", ""),
-                "snippet": item.get("description", ""),
-                "source": item.get("source", {}).get("name", "NewsAPI"),
-                "publishedAt": item.get("publishedAt", ""),
-            }
-        )
-    return results
-
-
-def build_prospect_from_result(result: Dict[str, Any], query: Dict[str, Any]) -> Prospect:
-    title = (result.get("title") or "").strip()
-    link = (result.get("link") or "").strip()
-    snippet = (result.get("snippet") or "").strip()
-    source = (result.get("source") or "Fuente real").strip()
-
-    sector = query.get("primary_sector", "")
-    location = ", ".join(query.get("target_locations", [])) if query.get("target_locations") else ""
-
-    return Prospect(
-        name=title or "Resultado sin título",
-        sector=sector,
-        location=location,
-        website=link,
-        source=source,
-        signal=snippet,
-        rationale="Coincide con la búsqueda definida por el usuario y aparece en una fuente real recuperada por la integración.",
-        pain_point="Por confirmar con más evidencia en fuentes conectadas.",
-        evidence=[snippet] if snippet else [],
-        technologies=[],
-    )
-
-
 if "pipeline" not in st.session_state:
     st.session_state.pipeline = []
 
@@ -213,18 +222,18 @@ with st.sidebar:
         size = st.text_input("Tamaño objetivo", placeholder="Ej. 50-400 empleados")
         keyword_raw = st.text_input("Señales / palabras clave", placeholder="Ej. expansión, contratación, nueva sucursal")
         limit = st.slider("Máximo de resultados por fuente", 5, 20, 10)
+        search_mode = st.selectbox("Modo de búsqueda", ["Web", "Mapas", "Ambos"])
         submitted = st.form_submit_button("Buscar prospectos reales")
 
     st.markdown("---")
-    st.subheader("Fuentes conectadas")
-    st.write("Google Custom Search:", "✅" if env("GOOGLE_CSE_API_KEY") and env("GOOGLE_CSE_ID") else "⚪ no configurada")
-    st.write("NewsAPI:", "✅" if env("NEWSAPI_KEY") else "⚪ no configurada")
-    st.caption("Si no configuras APIs, la app no mostrará datos ficticios.")
+    st.subheader("Fuente de datos")
+    st.write("SerpAPI:", "✅" if env("SERPAPI_KEY") else "⚪ no configurada")
+    st.caption("Configura SERPAPI_KEY en Streamlit Cloud para obtener resultados reales.")
 
 
 st.title("Cabina de Inteligencia Comercial")
 st.write(
-    "La aplicación busca y prioriza prospectos reales a partir de fuentes conectadas. No usa mock data, créditos, pagos ni autenticación."
+    "La aplicación busca y prioriza prospectos reales a partir de SerpAPI. No usa mock data, créditos, pagos ni autenticación."
 )
 
 query_cfg: Dict[str, Any] = {}
@@ -248,13 +257,12 @@ if submitted:
     if not search_query:
         st.warning("Completa al menos el producto o un criterio de búsqueda.")
     else:
-        with st.spinner("Consultando fuentes reales..."):
-            google_results = google_custom_search(search_query, num=limit)
-            news_results = newsapi_search(search_query, page_size=limit)
-
+        with st.spinner("Consultando SerpAPI..."):
             combined: List[Dict[str, Any]] = []
-            combined.extend(google_results)
-            combined.extend(news_results)
+            if search_mode in ["Web", "Ambos"]:
+                combined.extend(serpapi_search(search_query, engine="google", num=limit))
+            if search_mode in ["Mapas", "Ambos"]:
+                combined.extend(serpapi_search(search_query, engine="google_maps", num=limit))
 
             prospects: List[Prospect] = []
             for result in combined:
@@ -273,7 +281,7 @@ tab1, tab2, tab3 = st.tabs(["Prospectos reales", "Pipeline", "Mensajes"])
 with tab1:
     st.subheader("Prospectos encontrados")
     if not st.session_state.pipeline:
-        st.info("No hay prospectos cargados todavía. Conecta una API real y ejecuta una búsqueda.")
+        st.info("No hay prospectos cargados todavía. Conecta SERPAPI_KEY y ejecuta una búsqueda.")
         st.markdown(
             """
             <div class="card">
@@ -331,8 +339,9 @@ with tab2:
         if "next_step" not in pipeline_df.columns:
             pipeline_df["next_step"] = ""
 
+        cols = [c for c in ["name", "score", "source", "stage", "next_step", "website"] if c in pipeline_df.columns]
         edited = st.data_editor(
-            pipeline_df[["name", "score", "source", "stage", "next_step", "website"]],
+            pipeline_df[cols],
             use_container_width=True,
             num_rows="dynamic",
             hide_index=True,
@@ -344,11 +353,8 @@ with tab2:
                 )
             },
         )
-        st.caption("Los cambios de esta vista se mantienen en la sesión actual.")
-
         if st.button("Guardar cambios del pipeline"):
-            updated_pipeline = edited.to_dict(orient="records")
-            st.session_state.pipeline = updated_pipeline
+            st.session_state.pipeline = edited.to_dict(orient="records")
             st.success("Pipeline actualizado.")
 
 
@@ -399,6 +405,4 @@ with tab3:
 
 
 st.markdown("---")
-st.caption(
-    "Para que la app funcione con datos reales en Streamlit Cloud, define al menos una fuente: GOOGLE_CSE_API_KEY + GOOGLE_CSE_ID, NEWSAPI_KEY u otra API real conectada."
-)
+st.caption("Configura SERPAPI_KEY en Streamlit Cloud para obtener resultados reales.")
